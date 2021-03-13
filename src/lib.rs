@@ -38,7 +38,7 @@
 //! fastrand::shuffle(&mut v);
 //! ```
 //!
-//! Generate a random [`Vec`] or [`String`]:
+//! Generate a random [`Vec`][std::vec::Vec] or [`String`][std::string::String]:
 //!
 //! ```
 //! use std::iter::repeat_with;
@@ -66,31 +66,31 @@
 //! let rng = fastrand::Rng::new();
 //! let mut bytes: Vec<u8> = repeat_with(|| rng.u8(..)).take(10_000).collect();
 //! ```
+//!
+//! # Thread local RNG
+//!
+//! By default `fastrand` stores a thread local random number generator which is used in the
+//! top-level functions and to seed RNGs created with [`Rng::new`]. To use this crate in `no-std`
+//! environments you can disable it by turning off the default feature flags of this crate.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs, missing_debug_implementations, rust_2018_idioms)]
+#![no_std]
 
-use std::cell::Cell;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-use std::ops::{Bound, RangeBounds};
-use std::thread;
+#[cfg(feature = "thread-local")]
+extern crate std;
 
-#[cfg(target_arch = "wasm32")]
-use instant::Instant;
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::Instant;
+use core::cell::Cell;
+use core::ops::{Bound, RangeBounds};
+
+#[cfg(feature = "thread-local")]
+mod thread_local;
+#[cfg(feature = "thread-local")]
+pub use thread_local::*;
 
 /// A random number generator.
 #[derive(Debug)]
 pub struct Rng(Cell<u64>);
-
-impl Default for Rng {
-    #[inline]
-    fn default() -> Rng {
-        Rng::new()
-    }
-}
 
 impl Clone for Rng {
     /// Clones the generator by deterministically deriving a new generator based on the initial
@@ -198,16 +198,6 @@ impl Rng {
     }
 }
 
-thread_local! {
-    static RNG: Rng = Rng(Cell::new({
-        let mut hasher = DefaultHasher::new();
-        Instant::now().hash(&mut hasher);
-        thread::current().id().hash(&mut hasher);
-        let hash = hasher.finish();
-        (hash << 1) | 1
-    }));
-}
-
 /// Computes `(a * b) >> 32`.
 #[inline]
 fn mul_high_u32(a: u32, b: u32) -> u32 {
@@ -249,13 +239,13 @@ macro_rules! rng_integer {
             };
 
             let low = match range.start_bound() {
-                Bound::Unbounded => std::$t::MIN,
+                Bound::Unbounded => core::$t::MIN,
                 Bound::Included(&x) => x,
                 Bound::Excluded(&x) => x.checked_add(1).unwrap_or_else(panic_empty_range),
             };
 
             let high = match range.end_bound() {
-                Bound::Unbounded => std::$t::MAX,
+                Bound::Unbounded => core::$t::MAX,
                 Bound::Included(&x) => x,
                 Bound::Excluded(&x) => x.checked_sub(1).unwrap_or_else(panic_empty_range),
             };
@@ -264,7 +254,7 @@ macro_rules! rng_integer {
                 panic_empty_range();
             }
 
-            if low == std::$t::MIN && high == std::$t::MAX {
+            if low == core::$t::MIN && high == core::$t::MAX {
                 self.$gen() as $t
             } else {
                 let len = high.wrapping_sub(low).wrapping_add(1);
@@ -275,15 +265,6 @@ macro_rules! rng_integer {
 }
 
 impl Rng {
-    /// Creates a new random number generator.
-    #[inline]
-    pub fn new() -> Rng {
-        Rng::with_seed(
-            RNG.try_with(|rng| rng.u64(..))
-                .unwrap_or(0x4d595df4d0f33173),
-        )
-    }
-
     /// Creates a new random number generator with the initial seed.
     #[inline]
     pub fn with_seed(seed: u64) -> Self {
@@ -341,14 +322,14 @@ impl Rng {
     /// Generates a random `f32` in range `0..1`.
     pub fn f32(&self) -> f32 {
         let b = 32;
-        let f = std::f32::MANTISSA_DIGITS - 1;
+        let f = core::f32::MANTISSA_DIGITS - 1;
         f32::from_bits((1 << (b - 2)) - (1 << f) + (self.u32(..) >> (b - f))) - 1.0
     }
 
     /// Generates a random `f64` in range `0..1`.
     pub fn f64(&self) -> f64 {
         let b = 64;
-        let f = std::f64::MANTISSA_DIGITS - 1;
+        let f = core::f64::MANTISSA_DIGITS - 1;
         f64::from_bits((1 << (b - 2)) - (1 << f) + (self.u64(..) >> (b - f))) - 1.0
     }
 
@@ -505,91 +486,4 @@ impl Rng {
         let i = self.u8(..len);
         CHARS[i as usize] as char
     }
-}
-
-/// Initializes the thread-local generator with the given seed.
-#[inline]
-pub fn seed(seed: u64) {
-    RNG.with(|rng| rng.seed(seed))
-}
-
-/// Generates a random `bool`.
-#[inline]
-pub fn bool() -> bool {
-    RNG.with(|rng| rng.bool())
-}
-
-/// Generates a random `char` in ranges a-z and A-Z.
-#[inline]
-pub fn alphabetic() -> char {
-    RNG.with(|rng| rng.alphabetic())
-}
-
-/// Generates a random `char` in ranges a-z, A-Z and 0-9.
-#[inline]
-pub fn alphanumeric() -> char {
-    RNG.with(|rng| rng.alphanumeric())
-}
-
-/// Generates a random `char` in range a-z.
-#[inline]
-pub fn lowercase() -> char {
-    RNG.with(|rng| rng.lowercase())
-}
-
-/// Generates a random `char` in range A-Z.
-#[inline]
-pub fn uppercase() -> char {
-    RNG.with(|rng| rng.uppercase())
-}
-
-/// Generates a random digit in the given `base`.
-///
-/// Digits are represented by `char`s in ranges 0-9 and a-z.
-///
-/// Panics if the base is zero or greater than 36.
-#[inline]
-pub fn digit(base: u32) -> char {
-    RNG.with(|rng| rng.digit(base))
-}
-
-/// Shuffles a slice randomly.
-#[inline]
-pub fn shuffle<T>(slice: &mut [T]) {
-    RNG.with(|rng| rng.shuffle(slice))
-}
-
-macro_rules! integer {
-    ($t:tt, $doc:tt) => {
-        #[doc = $doc]
-        ///
-        /// Panics if the range is empty.
-        #[inline]
-        pub fn $t(range: impl RangeBounds<$t>) -> $t {
-            RNG.with(|rng| rng.$t(range))
-        }
-    };
-}
-
-integer!(u8, "Generates a random `u8` in the given range.");
-integer!(i8, "Generates a random `i8` in the given range.");
-integer!(u16, "Generates a random `u16` in the given range.");
-integer!(i16, "Generates a random `i16` in the given range.");
-integer!(u32, "Generates a random `u32` in the given range.");
-integer!(i32, "Generates a random `i32` in the given range.");
-integer!(u64, "Generates a random `u64` in the given range.");
-integer!(i64, "Generates a random `i64` in the given range.");
-integer!(u128, "Generates a random `u128` in the given range.");
-integer!(i128, "Generates a random `i128` in the given range.");
-integer!(usize, "Generates a random `usize` in the given range.");
-integer!(isize, "Generates a random `isize` in the given range.");
-
-/// Generates a random `f32` in range `0..1`.
-pub fn f32() -> f32 {
-    RNG.with(|rng| rng.f32())
-}
-
-/// Generates a random `f64` in range `0..1`.
-pub fn f64() -> f64 {
-    RNG.with(|rng| rng.f64())
 }

@@ -1,3 +1,5 @@
+#![cfg(feature = "thread-local")]
+
 #![feature(test)]
 
 extern crate test;
